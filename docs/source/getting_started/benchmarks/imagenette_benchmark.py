@@ -47,6 +47,7 @@ import torch.nn as nn
 import torchvision
 from lightly.models import modules
 from lightly.models.modules import heads
+from lightly.models.modules import encoders
 from lightly.models import utils
 from lightly.utils import BenchmarkModule
 from pytorch_lightning.loggers import TensorBoardLogger
@@ -117,15 +118,25 @@ dino_collate_fn = lightly.data.DINOCollateFunction(
     local_crop_size=64,
 )
 
+normalize_transform = torchvision.transforms.Normalize(
+    mean=lightly.data.collate.imagenet_normalize['mean'],
+    std=lightly.data.collate.imagenet_normalize['std'],
+)
+
+# MAE transforms
+mae_train_transforms = torchvision.transforms.Compose([
+    torchvision.transforms.RandomResizedCrop(224, scale=(0.2, 1.0), interpolation=3),  # 3 is bicubic
+    torchvision.transforms.RandomHorizontalFlip(),
+    torchvision.transforms.ToTensor(),
+    normalize_transform,
+])
+
 # No additional augmentations for the test set
 test_transforms = torchvision.transforms.Compose([
     torchvision.transforms.Resize(input_size),
     torchvision.transforms.CenterCrop(128),
     torchvision.transforms.ToTensor(),
-    torchvision.transforms.Normalize(
-        mean=lightly.data.collate.imagenet_normalize['mean'],
-        std=lightly.data.collate.imagenet_normalize['std'],
-    )
+    normalize_transform,
 ])
 
 dataset_train_ssl = lightly.data.LightlyDataset(
@@ -154,6 +165,9 @@ def get_data_loaders(batch_size: int, model):
         col_fn = swav_collate_fn
     elif model == DINOModel:
         col_fn = dino_collate_fn
+    elif model == MAEModel:
+        dataset_train_ssl.transform = mae_train_transforms
+        col_fn = None
     dataloader_train_ssl = torch.utils.data.DataLoader(
         dataset_train_ssl,
         batch_size=batch_size,
@@ -577,6 +591,84 @@ class DINOModel(BenchmarkModule):
         return [optim], [scheduler]
 
 
+class MAEModel(BenchmarkModule):
+    def __init__(self, dataloader_kNN, num_classes):
+        super().__init__(dataloader_kNN, num_classes)
+        
+        decoder_dim = 512
+        vit = torchvision.models.vit_b_32(pretrained=False)
+
+        self.mask_ratio = 0.75
+        self.vit = vit
+        self.class_token = vit.class_token
+        self.mask_token = torch.nn.Parameter(torch.zeros(1, 1, decoder_dim))
+        self.encoder = encoders.MAEEncoder.from_vit_encoder(vit.encoder)
+        self.decoder = encoders.MAEDecoder(
+            seq_length=vit.seq_length,
+            num_layers=1,
+            num_heads=16,
+            embed_input_dim=vit.hidden_dim,
+            hidden_dim=decoder_dim,
+            mlp_dim=decoder_dim * 4,
+            out_dim=vit.patch_size ** 2 * 3,
+            dropout=0,
+            attention_dropout=0,
+        )
+        self.criterion = nn.MSELoss()
+
+    def forward_encoder(self, x):
+        pass
+
+    def forward_decoder(self, x, x_encoded, idx_keep, idx_mask):
+        # build decoder input
+        x_decode = self.decoder.embed(x_encoded)
+        x_masked = utils.repeat_token_like(self.mask_token, x)
+        x_masked = utils.set_at_index(x_masked, idx_keep, x_decode)
+
+        # decoder forward pass
+        x_decoded = self.decoder(x_masked)
+
+        # predict pixel values for masked tokens
+        x_pred = utils.get_at_index(x_decoded, idx_mask)
+        x_pred = self.decoder.predict(x_pred)
+        return x_pred
+
+
+    def training_step(self, batch, batch_idx):
+        images, _, _ = batch
+
+
+        x = self.vit._process_input(images)
+        x = utils.prepend_class_token(x, self.class_token)
+        idx_keep, idx_mask = utils.random_mask_from_ratio(x, mask_ratio=self.mask_ratio)
+        x_encoded = self.encoder(x, idx_keep)
+        
+        x_pred = self.forward_decoder(x, x_encoded, idx_keep, idx_mask)
+
+        # get image patches for masked tokens
+        # must adjust idx_mask for missing class token
+        patches = utils.patchify(images, self.vit.patch_size)
+        target = utils.get_at_index(patches, idx_mask - 1)
+        
+        loss = self.criterion(x_pred, target)
+        self.log('train_loss_ssl', loss)
+        return loss
+
+    def configure_optimizers(self):
+        param = (
+            [self.class_token, self.mask_token]
+            + list(self.encoder.parameters())
+            + list(self.decoder.parameters())
+        )
+        optim = torch.optim.AdamW(
+            param,
+            lr=1e-3 * lr_factor,
+            weight_decay=0.05,
+        )
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optim, max_epochs)
+        return [optim], [scheduler]
+
+
 models = [
     BarlowTwinsModel, 
     BYOLModel,
@@ -650,6 +742,9 @@ for BenchmarkModel in models:
         del trainer
         torch.cuda.reset_peak_memory_stats()
         torch.cuda.empty_cache()
+
+        # reset dataset transform
+        dataset_train_ssl.transform = None
     
     bench_results[model_name] = runs
 
