@@ -599,9 +599,11 @@ class MAEModel(BenchmarkModule):
         vit = torchvision.models.vit_b_32(pretrained=False)
 
         self.mask_ratio = 0.75
-        self.vit = vit
+        self.patch_size = vit.patch_size
+        self.sequence_length = vit.seq_length
         self.class_token = vit.class_token
         self.mask_token = torch.nn.Parameter(torch.zeros(1, 1, decoder_dim))
+        self.image_to_embed_conv = vit.conv_proj
         self.encoder = encoders.MAEEncoder.from_vit_encoder(vit.encoder)
         self.decoder = encoders.MAEDecoder(
             seq_length=vit.seq_length,
@@ -616,13 +618,29 @@ class MAEModel(BenchmarkModule):
         )
         self.criterion = nn.MSELoss()
 
-    def forward_encoder(self, x):
-        pass
+    def random_mask(self, images):
+        batch_size = images.shape[0]
+        mask_size = (batch_size, self.sequence_length)
+        idx_keep, idx_mask = utils.random_token_mask(mask_size, mask_ratio=self.mask_ratio)
+        return idx_keep, idx_mask
 
-    def forward_decoder(self, x, x_encoded, idx_keep, idx_mask):
+    def embed_images(self, images):
+        # convert images into patch embeddings
+        # output has shape (batch_size, height_n_patches * width_n_patches, embed_dim)
+        x = self.image_to_embed_conv(images)
+        x = x.flatten(2).transpose(1, 2) 
+        return x
+
+    def forward_encoder(self, images, idx_keep=None):
+        x = self.embed_images(images)
+        x = utils.prepend_class_token(x, self.class_token)
+        return self.encoder(x, idx_keep)
+
+    def forward_decoder(self, x_encoded, idx_keep, idx_mask):
         # build decoder input
+        batch_size = x_encoded.shape[0]
         x_decode = self.decoder.embed(x_encoded)
-        x_masked = utils.repeat_token_like(self.mask_token, x)
+        x_masked = utils.repeat_token(self.mask_token, (batch_size, self.sequence_length))
         x_masked = utils.set_at_index(x_masked, idx_keep, x_decode)
 
         # decoder forward pass
@@ -636,18 +654,14 @@ class MAEModel(BenchmarkModule):
 
     def training_step(self, batch, batch_idx):
         images, _, _ = batch
-
-
-        x = self.vit._process_input(images)
-        x = utils.prepend_class_token(x, self.class_token)
-        idx_keep, idx_mask = utils.random_mask_from_ratio(x, mask_ratio=self.mask_ratio)
-        x_encoded = self.encoder(x, idx_keep)
         
-        x_pred = self.forward_decoder(x, x_encoded, idx_keep, idx_mask)
+        idx_keep, idx_mask = self.random_mask(images)
+        x_encoded = self.forward_encoder(images, idx_keep)
+        x_pred = self.forward_decoder(x_encoded, idx_keep, idx_mask)
 
         # get image patches for masked tokens
+        patches = utils.patchify(images, self.patch_size)
         # must adjust idx_mask for missing class token
-        patches = utils.patchify(images, self.vit.patch_size)
         target = utils.get_at_index(patches, idx_mask - 1)
         
         loss = self.criterion(x_pred, target)
@@ -655,13 +669,8 @@ class MAEModel(BenchmarkModule):
         return loss
 
     def configure_optimizers(self):
-        param = (
-            [self.class_token, self.mask_token]
-            + list(self.encoder.parameters())
-            + list(self.decoder.parameters())
-        )
         optim = torch.optim.AdamW(
-            param,
+            self.parameters(),
             lr=1e-3 * lr_factor,
             weight_decay=0.05,
         )
@@ -670,14 +679,15 @@ class MAEModel(BenchmarkModule):
 
 
 models = [
-    BarlowTwinsModel, 
-    BYOLModel,
-    DINOModel,
-    MocoModel,
-    NNCLRModel,
-    SimCLRModel,
-    SimSiamModel,
-    SwaVModel,
+    # BarlowTwinsModel, 
+    # BYOLModel,
+    # DINOModel,
+    # MocoModel,
+    # NNCLRModel,
+    # SimCLRModel,
+    # SimSiamModel,
+    # SwaVModel,
+    MAEModel,
 ]
 bench_results = dict()
 
