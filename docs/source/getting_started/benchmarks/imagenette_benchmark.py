@@ -620,8 +620,11 @@ class MAEModel(BenchmarkModule):
 
     def random_mask(self, images):
         batch_size = images.shape[0]
-        mask_size = (batch_size, self.sequence_length)
-        idx_keep, idx_mask = utils.random_token_mask(mask_size, mask_ratio=self.mask_ratio)
+        idx_keep, idx_mask = utils.random_token_mask(
+            size=(batch_size, self.sequence_length),
+            mask_ratio=self.mask_ratio,
+            device=images.device,
+        )
         return idx_keep, idx_mask
 
     def embed_images(self, images):
