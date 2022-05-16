@@ -601,10 +601,8 @@ class MAEModel(BenchmarkModule):
         self.mask_ratio = 0.75
         self.patch_size = vit.patch_size
         self.sequence_length = vit.seq_length
-        self.class_token = vit.class_token
-        self.mask_token = torch.nn.Parameter(torch.zeros(1, 1, decoder_dim))
-        self.image_to_embed_conv = vit.conv_proj
-        self.encoder = encoders.MAEEncoder.from_vit_encoder(vit.encoder)
+        self.mask_token = nn.Parameter(torch.zeros(1, 1, decoder_dim))
+        self.backbone = encoders.MAEBackbone.from_vit(vit)
         self.decoder = encoders.MAEDecoder(
             seq_length=vit.seq_length,
             num_layers=1,
@@ -617,11 +615,6 @@ class MAEModel(BenchmarkModule):
             attention_dropout=0,
         )
         self.criterion = nn.MSELoss()
-        self.encoder.forward = self.forward
-
-    @property
-    def backbone(self):
-        return self.encoder
 
     def random_mask(self, images):
         batch_size = images.shape[0]
@@ -632,22 +625,8 @@ class MAEModel(BenchmarkModule):
         )
         return idx_keep, idx_mask
 
-    def embed_images(self, images):
-        # convert images into patch embeddings
-        # output has shape (batch_size, height_n_patches * width_n_patches, embed_dim)
-        x = self.image_to_embed_conv(images)
-        x = x.flatten(2).transpose(1, 2) 
-        return x
-
-    def forward(self, images):
-        x = self.forward_encoder(images)
-        class_token = x[:, 0]
-        return class_token
-
     def forward_encoder(self, images, idx_keep=None):
-        x = self.embed_images(images)
-        x = utils.prepend_class_token(x, self.class_token)
-        return self.encoder.encode(x, idx_keep)
+        return self.backbone.encode(images, idx_keep)
 
     def forward_decoder(self, x_encoded, idx_keep, idx_mask):
         # build decoder input
@@ -657,7 +636,7 @@ class MAEModel(BenchmarkModule):
         x_masked = utils.set_at_index(x_masked, idx_keep, x_decode)
 
         # decoder forward pass
-        x_decoded = self.decoder(x_masked)
+        x_decoded = self.decoder.decode(x_masked)
 
         # predict pixel values for masked tokens
         x_pred = utils.get_at_index(x_decoded, idx_mask)
