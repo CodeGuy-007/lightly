@@ -662,8 +662,9 @@ class MAEModel(BenchmarkModule):
     def configure_optimizers(self):
         optim = torch.optim.AdamW(
             self.parameters(),
-            lr=1e-3 * lr_factor,
+            lr=1.5e-4 * lr_factor,
             weight_decay=0.05,
+            betas=(0.9, 0.95),
         )
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optim, max_epochs)
         return [optim], [scheduler]
