@@ -62,7 +62,7 @@ max_epochs = 800
 knn_k = 200
 knn_t = 0.1
 classes = 10
-input_size=128
+input_size=224
 
 # Set to True to enable Distributed Data Parallel training.
 distributed = False
@@ -134,7 +134,7 @@ mae_train_transforms = torchvision.transforms.Compose([
 # No additional augmentations for the test set
 test_transforms = torchvision.transforms.Compose([
     torchvision.transforms.Resize(input_size),
-    torchvision.transforms.CenterCrop(128),
+    torchvision.transforms.CenterCrop(224),
     torchvision.transforms.ToTensor(),
     normalize_transform,
 ])
@@ -617,6 +617,11 @@ class MAEModel(BenchmarkModule):
             attention_dropout=0,
         )
         self.criterion = nn.MSELoss()
+        self.encoder.forward = self.forward
+
+    @property
+    def backbone(self):
+        return self.encoder
 
     def random_mask(self, images):
         batch_size = images.shape[0]
@@ -634,10 +639,15 @@ class MAEModel(BenchmarkModule):
         x = x.flatten(2).transpose(1, 2) 
         return x
 
+    def forward(self, images):
+        x = self.forward_encoder(images)
+        class_token = x[:, 0]
+        return class_token
+
     def forward_encoder(self, images, idx_keep=None):
         x = self.embed_images(images)
         x = utils.prepend_class_token(x, self.class_token)
-        return self.encoder(x, idx_keep)
+        return self.encoder.encode(x, idx_keep)
 
     def forward_decoder(self, x_encoded, idx_keep, idx_mask):
         # build decoder input
@@ -653,7 +663,6 @@ class MAEModel(BenchmarkModule):
         x_pred = utils.get_at_index(x_decoded, idx_mask)
         x_pred = self.decoder.predict(x_pred)
         return x_pred
-
 
     def training_step(self, batch, batch_idx):
         images, _, _ = batch
