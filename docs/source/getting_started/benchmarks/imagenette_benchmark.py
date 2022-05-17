@@ -36,6 +36,7 @@ Results (5.3.2022):
 
 """
 import copy
+import math
 import os
 
 import time
@@ -598,6 +599,7 @@ class MAEModel(BenchmarkModule):
         decoder_dim = 512
         vit = torchvision.models.vit_b_32(pretrained=False)
 
+        self.warmup_epochs = 40 if max_epochs >= 800 else 20
         self.mask_ratio = 0.75
         self.patch_size = vit.patch_size
         self.sequence_length = vit.seq_length
@@ -666,8 +668,15 @@ class MAEModel(BenchmarkModule):
             weight_decay=0.05,
             betas=(0.9, 0.95),
         )
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optim, max_epochs)
-        return [optim], [scheduler]
+        cosine_with_warmup_scheduler = torch.optim.lr_scheduler.LambdaLR(optim, self.scale_lr)
+        return [optim], [cosine_with_warmup_scheduler]
+
+    def scale_lr(self, epoch):
+        if epoch < self.warmup_epochs:
+            return epoch / self.warmup_epochs 
+        else:
+            return 0.5 * (1. + math.cos(math.pi * (epoch - self.warmup_epochs) / (max_epochs - self.warmup_epochs)))
+
 
 
 models = [
